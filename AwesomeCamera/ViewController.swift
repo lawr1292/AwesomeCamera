@@ -9,6 +9,7 @@ import AVFoundation
 import Vision
 import Foundation
 import CoreML
+import CoreImage
 
 enum CameraConfigurationStatus {
     case success
@@ -297,7 +298,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                         let poses = self.postProcessPose(prediction: multiArray)
                         print(poses)
                         if !(poses.count == 0) {
-                            self.drawVisionRequestResult(poses[0].box)
+                            self.drawVisionRequestResult(poses)
                         } else {
                             CATransaction.begin()
                             CATransaction.setValue(kCFBooleanTrue, forKey: kCATransactionDisableActions)
@@ -421,15 +422,19 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             print("Failed to get pixel buffer")
             return
         }
-        
+
+        guard let preprocessedImage = preprocessImage(pixelBuffer) else {
+            print("Failed to preprocess image")
+            return
+        }
+
         var requestOptions: [VNImageOption: Any] = [:]
-        
+
         if let cameraData = CMGetAttachment(sampleBuffer, key: kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix, attachmentModeOut: nil) {
             requestOptions = [.cameraIntrinsics: cameraData]
         }
-        
-        let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .left, options: [:])
-        
+
+        let imageRequestHandler = VNImageRequestHandler(ciImage: preprocessedImage, orientation: .upMirrored, options: requestOptions)
         do {
             try imageRequestHandler.perform(self.requests)
         } catch {
@@ -479,19 +484,52 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         CATransaction.commit()
     }
     
-    public func drawVisionRequestResult(_ result: Box) {
-        //let drawing = CGRect(x: result.xywh.midX-result.xywh.width/2, y: result.xywh.midY-result.xywh.height/2, width: result.xywh.width, height: result.xywh.height) // Static rectangle for demonstration
-        let drawing = CGRect(x: detectionOverlay.bounds.midX-75, y: detectionOverlay.bounds.midY-37, width: 150, height: 75) // Static rectangle for demonstration
+    public func drawVisionRequestResult(_ results: [(box: Box, keypoints: Keypoints)]) {
+        var drawings:[CGRect] = []
+        for result in results {
+            let drawing = CGRect(x: result.box.xywh.midX-result.box.xywh.width/2, y: result.box.xywh.midY-result.box.xywh.height/2, width: result.box.xywh.width, height: result.box.xywh.height)
+            drawings.append(drawing)
+        }// Static rectangle for demonstration
+        //let drawing = CGRect(x: detectionOverlay.bounds.midX-75, y: detectionOverlay.bounds.midY-37, width: 150, height: 75) // Static rectangle for demonstration
         
         CATransaction.begin()
         CATransaction.setValue(kCFBooleanTrue, forKey: kCATransactionDisableActions)
         detectionOverlay?.sublayers = nil
-        let shapeLayer = createRoundedRectLayerWithBounds(drawing)
-        
-        detectionOverlay?.addSublayer(shapeLayer)
+        for drawing in drawings {
+            let shapeLayer = createRoundedRectLayerWithBounds(drawing)
+            detectionOverlay?.addSublayer(shapeLayer)
+        }
+        for kp in results{
+            var kpDrawing = createDotLayers(kp.keypoints)
+            for layer in kpDrawing {
+                detectionOverlay?.addSublayer(layer)
+            }
+        }
         self.updateLayerGeometry()
         
         CATransaction.commit()
+    }
+    
+    func createDotLayers(_ kps: Keypoints) -> [CAShapeLayer]{
+        var layers:[CAShapeLayer] = []
+        for dot in kps.xy {
+          let landmarkLayer = CAShapeLayer()
+          let color:CGColor = UIColor.systemTeal.cgColor
+          let stroke:CGColor = UIColor.yellow.cgColor
+          
+          landmarkLayer.fillColor = color
+          landmarkLayer.strokeColor = stroke
+          landmarkLayer.lineWidth = 2.0
+          
+          let center = CGPoint(
+            x: CGFloat(dot.x),
+            y: CGFloat(dot.y))
+          let radius: CGFloat = 5.0 // Adjust this as needed.
+          let rect = CGRect(x: CGFloat(dot.x) - radius, y: CGFloat(dot.y) - radius, width: radius * 2, height: radius * 2)
+          landmarkLayer.path = UIBezierPath(ovalIn: rect).cgPath
+            layers.append(landmarkLayer)
+        }
+        return layers
     }
     
     func createRoundedRectLayerWithBounds(_ bounds: CGRect) -> CALayer {
@@ -504,10 +542,74 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         return shapeLayer
     }
     
+    func preprocessImage(_ pixelBuffer: CVPixelBuffer) -> CIImage? {
+        // Create a CIImage from the pixel buffer
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        
+        // Resize the image to 640x640
+        guard let resizedCIImage = ciImage.resize(to: CGSize(width: 640, height: 640)) else {
+            return nil
+        }
+        
+        // Normalize pixel values if required by the model (usually not required for Core ML models with image input)
+        return resizedCIImage
+    }
+//    func preprocessImage(_ pixelBuffer: CVPixelBuffer) -> CVPixelBuffer? {
+//        // Create a CIImage from the pixel buffer
+//        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+//        
+//        // Resize the image to 640x640
+//        guard let resizedCIImage = ciImage.resize(to: CGSize(width: 640, height: 640)) else {
+//            return nil
+//        }
+//        
+//        // Create a CVPixelBuffer to hold the resized and normalized image
+//        var resizedPixelBuffer: CVPixelBuffer?
+//        let attributes: [String: Any] = [kCVPixelBufferCGImageCompatibilityKey as String: true,
+//                                         kCVPixelBufferCGBitmapContextCompatibilityKey as String: true]
+//        let status = CVPixelBufferCreate(kCFAllocatorDefault, 640, 640, kCVPixelFormatType_OneComponent8, attributes as CFDictionary, &resizedPixelBuffer)
+//        
+//        guard status == kCVReturnSuccess, let outputPixelBuffer = resizedPixelBuffer else {
+//            return nil
+//        }
+//        
+//        // Lock the base address of the output pixel buffer
+//        CVPixelBufferLockBaseAddress(outputPixelBuffer, .readOnly)
+//        defer { CVPixelBufferUnlockBaseAddress(outputPixelBuffer, .readOnly) }
+//        
+//        // Create a context and draw the resized CIImage into the CVPixelBuffer
+//        let context = CIContext()
+//        context.render(resizedCIImage, to: outputPixelBuffer)
+//        
+//        // Normalize pixel values to the range [-128, 127] and cast to int8
+//        let width = CVPixelBufferGetWidth(outputPixelBuffer)
+//        let height = CVPixelBufferGetHeight(outputPixelBuffer)
+//        let bytesPerRow = CVPixelBufferGetBytesPerRow(outputPixelBuffer)
+//        let baseAddress = CVPixelBufferGetBaseAddress(outputPixelBuffer)
+//        
+//        let rawPointer = baseAddress?.assumingMemoryBound(to: Int8.self)
+//        for y in 0..<height {
+//            for x in 0..<width {
+//                let pixelIndex = y * bytesPerRow + x
+//                let normalizedValue = Float(rawPointer![pixelIndex]) / 255.0 * 255.0 - 128.0
+//                rawPointer![pixelIndex] = Int8(normalizedValue)
+//            }
+//        }
+//        
+//        return outputPixelBuffer
+//    }
+
+    
 }
 
 extension CGRect {
     var area: CGFloat { return width * height }
 }
 
-
+extension CIImage {
+    func resize(to size: CGSize) -> CIImage? {
+        let scaleX = size.width / extent.size.width
+        let scaleY = size.height / extent.size.height
+        return transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+    }
+}
