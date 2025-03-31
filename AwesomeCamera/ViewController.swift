@@ -284,7 +284,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         // Setup Vision parts
         let error: NSError! = nil
         
-        guard let modelURL = Bundle.main.url(forResource: "best_total", withExtension: "mlmodelc") else {
+        guard let modelURL = Bundle.main.url(forResource: "best_total_bare", withExtension: "mlmodelc") else {
             print("Model file is missing1")
             return NSError(domain: "VisionObjectRecognitionViewController", code: -1, userInfo: [NSLocalizedDescriptionKey: "Model file is missing"])
         }
@@ -295,8 +295,8 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                     if let multiArray = featureValue.multiArrayValue {
                         // multiArray is your 1 x 21 x 8400 array
                         // Call your post-processing function with the extracted array
-                        let poses = self.postProcessPose(prediction: multiArray)
-                        print(poses)
+                        let poses = self.postProcessPose2(prediction: multiArray)
+                        //print(poses)
                         if !(poses.count == 0) {
                             self.drawVisionRequestResult(poses)
                         } else {
@@ -321,99 +321,103 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         return error
     }
     
-    func postProcessPose( prediction: MLMultiArray )
-    -> [(box: Box, keypoints: Keypoints)]   {
-        let numAnchors = prediction.shape[2].intValue
-        let featureCount = prediction.shape[1].intValue - 5
+    func postProcessPose2(prediction: MLMultiArray, confidenceThreshold: Float = 0.35) -> [(box: Box, keypoints: Keypoints)] {
+        let detectionResults = prediction
+        let detectionResultsArray = prediction.dataPointer.bindMemory(to: Float.self, capacity: prediction.count)
+        var detectionResultsMatrix = [[Float]]()
+        for i in 0..<prediction.shape[1].intValue {
+            var row = [Float]()
+            for j in 0..<prediction.shape[2].intValue {
+                row.append(detectionResultsArray[i * prediction.shape[2].intValue + j])
+            }
+            detectionResultsMatrix.append(row)
+        }
         
-        var boxes = [CGRect]()
-        var scores = [Float]()
-        var features = [[Float]]()
+        var boxes = [[Float]]()
+        var confidences = [Float]()
+        var keypoints = [[Float]]()
         
-        let featurePointer = UnsafeMutablePointer<Float>(OpaquePointer(prediction.dataPointer))
-        let lock = DispatchQueue(label: "com.example.lock")
+        for i in 0..<4 {
+            boxes.append(detectionResultsMatrix[i])
+        }
         
-        DispatchQueue.concurrentPerform(iterations: numAnchors) { j in
-            let confIndex = 4 * numAnchors + j
-            let confidence = featurePointer[confIndex]
-            
-            if confidence > 0.35 {
-                let x = featurePointer[j]
-                let y = featurePointer[numAnchors + j]
-                let width = featurePointer[2 * numAnchors + j]
-                let height = featurePointer[3 * numAnchors + j]
-                
-                let boxWidth = CGFloat(width)
-                let boxHeight = CGFloat(height)
-                let boxX = CGFloat(x - width / 2.0)
-                let boxY = CGFloat(y - height / 2.0)
-                let boundingBox = CGRect(
-                    x: boxX, y: boxY,
-                    width: boxWidth, height: boxHeight)
-                
-                var boxFeatures = [Float](repeating: 0, count: featureCount)
-                for k in 0..<featureCount {
-                    let key = (5 + k) * numAnchors + j
-                    boxFeatures[k] = featurePointer[key]
+        confidences = detectionResultsMatrix[4]
+        for i in 5..<detectionResultsMatrix.count {
+            keypoints.append(detectionResultsMatrix[i])
+        }
+        
+        var filteredBoxes = [[Float]]()
+        var filteredConfidences = [Float]()
+        var filteredKeypoints = [[Float]]()
+        var outBoxes = [Box]()
+        var preOutKpsn = [(x: Float, y: Float)]()
+        var preOutKps = [(x: Float, y: Float)]()
+        var outKps = [Keypoints]()
+        
+        // add proper Keypoints and Boxes
+        /**
+         public struct Box {
+             public let conf: Float
+             public let xywh: CGRect
+             public let xywhn: CGRect
+         }
+
+         public struct Keypoints {
+             public var xyn: [(x:Float, y:Float)]
+             public var xy: [(x:Float, y:Float)]
+             public let conf: [Float]
+         }
+         */
+        
+        
+        for (idx, confidence) in confidences.enumerated() {
+            if confidence > confidenceThreshold {
+                for i in 0..<4 {
+                    filteredBoxes[i].append(boxes[i][idx])
                 }
-                
-                lock.sync {
-                    boxes.append(boundingBox)
-                    scores.append(confidence)
-                    features.append(boxFeatures)
+                filteredConfidences.append(confidence)
+                for box in filteredBoxes {
+                    let xn = CGFloat(box[0])
+                    let yn = CGFloat(box[1])
+                    let wn = CGFloat(box[2])
+                    let hn = CGFloat(box[3])
+                    var rectn = CGRect(x: xn, y: yn, width: wn, height: hn)
+                    let x = CGFloat(box[0]) * bufferSize.width
+                    let y = CGFloat(box[1]) * bufferSize.height
+                    let w = CGFloat(box[2]) * bufferSize.width
+                    let h = CGFloat(box[3]) * bufferSize.height
+                    var rect = CGRect(x: x, y: y, width: w, height: h)
+                    var structBox = Box(conf: confidence, xywh: rect, xywhn: rectn)
+                    outBoxes.append(structBox)
                 }
+                for i in 0..<keypoints.count {
+                    filteredKeypoints[i].append(keypoints[i][idx])
+                }
+                for kp in filteredKeypoints {
+                    let xn = kp[0]
+                    let yn = kp[1]
+                    let x = kp[0] * Float(bufferSize.width)
+                    let y = kp[1] * Float(bufferSize.height)
+                    preOutKps.append((x: x, y: y))
+                    preOutKpsn.append((x: xn, y: yn))
+                }
+                let structKP = Keypoints(xyn: preOutKpsn, xy: preOutKps, conf: [confidence])
+                outKps.append(structKP)
             }
         }
         
-        let selectedIndices = nonMaxSuppression(boxes: boxes, scores: scores, threshold: 0.5)
-        
-        let filteredBoxes = selectedIndices.map { boxes[$0] }
-        let filteredScores = selectedIndices.map { scores[$0] }
-        let filteredFeatures = selectedIndices.map { features[$0] }
-        
-        let boxScorePairs = zip(filteredBoxes, filteredScores)
-        let results: [(Box, Keypoints)] = zip(boxScorePairs, filteredFeatures).map {
-            (pair, boxFeatures) in
-            let (box, score) = pair
-            let Nx = box.origin.x / CGFloat(modelInputSize.width)
-            let Ny = box.origin.y / CGFloat(modelInputSize.height)
-            let Nw = box.size.width / CGFloat(modelInputSize.width)
-            let Nh = box.size.height / CGFloat(modelInputSize.height)
-            let ix = Nx * bufferSize.width
-            let iy = Ny * bufferSize.height
-            let iw = Nw * bufferSize.width
-            let ih = Nh * bufferSize.height
-            let normalizedBox = CGRect(x: Nx, y: Ny, width: Nw, height: Nh)
-            let imageSizeBox = CGRect(x: ix, y: iy, width: iw, height: ih)
-            let boxResult = Box(
-                conf: score, xywh: imageSizeBox, xywhn: normalizedBox)
-            let numKeypoints = boxFeatures.count / 3
-            
-            var xynArray = [(x: Float, y: Float)]()
-            var xyArray = [(x: Float, y: Float)]()
-            var confArray = [Float]()
-            
-            for i in 0..<numKeypoints {
-                let kx = boxFeatures[3 * i]
-                let ky = boxFeatures[3 * i + 1]
-                let kc = boxFeatures[3 * i + 2]
-                
-                let nX = kx / Float(modelInputSize.width)
-                let nY = ky / Float(modelInputSize.height)
-                xynArray.append((x: nX, y: nY))
-                
-                let x = nX * Float(bufferSize.width)
-                let y = nY * Float(bufferSize.height)
-                xyArray.append((x: x, y: y))
-                
-                confArray.append(kc)
-            }
-            
-            let keypoints = Keypoints(xyn: xynArray, xy: xyArray, conf: confArray)
-            return (boxResult, keypoints)
+        if filteredConfidences.count > 0 {
+            let maxConfidenceIdx = filteredConfidences.firstIndex(of: filteredConfidences.max()!)!
+            let maxConfidence = filteredConfidences[maxConfidenceIdx]
+            let maxConfidenceBox = filteredBoxes.map { $0[maxConfidenceIdx] }
+            let maxConfidenceKeypoints = filteredKeypoints.map { $0[maxConfidenceIdx] }
         }
         
-        return results
+        var retVar = [(Box, Keypoints)]()
+        for (idx, box) in outBoxes.enumerated() {
+            retVar.append((box, outKps[idx]))
+        }
+        return retVar
     }
     
     
