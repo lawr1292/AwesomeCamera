@@ -43,7 +43,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     var highestSupportedFrameRate = 0.0
     var highestFrameRate: CMTime? = nil
     var highestQualityFormat: AVCaptureDevice.Format? = nil
-    var modelInputSize = CGSize(width: 640, height: 640)
+    var modelInputSize = CGSize(width: 224, height: 224)
     var ourOrientation: CGImagePropertyOrientation = {
         switch UIDevice.current.orientation {
         case .unknown:
@@ -157,8 +157,8 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         detectionOverlay.name = "DetectionOverlay"
         detectionOverlay.bounds = CGRect(x: 0.0,
                                          y: 0.0,
-                                         width: bufferSize.width,
-                                         height: bufferSize.height)
+                                         width: self.view.bounds.width,
+                                         height: self.view.bounds.height)
         detectionOverlay.position = CGPoint(x: previewLayer.bounds.midX, y: previewLayer.bounds.midY)
         previewLayer.addSublayer(detectionOverlay)
     }
@@ -284,7 +284,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         // Setup Vision parts
         let error: NSError! = nil
         
-        guard let modelURL = Bundle.main.url(forResource: "best_total_bare", withExtension: "mlmodelc") else {
+        guard let modelURL = Bundle.main.url(forResource: "best_m_224", withExtension: "mlmodelc") else {
             print("Model file is missing1")
             return NSError(domain: "VisionObjectRecognitionViewController", code: -1, userInfo: [NSLocalizedDescriptionKey: "Model file is missing"])
         }
@@ -293,7 +293,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             let objectRecognition = VNCoreMLRequest(model: visionModel) { (request, error) in
                 if let results = request.results as? [VNCoreMLFeatureValueObservation], let featureValue = results.first?.featureValue {
                     if let multiArray = featureValue.multiArrayValue {
-                        // multiArray is your 1 x 21 x 8400 array
+                        // multiArray is your 1 x 21 x 1029 array
                         // Call your post-processing function with the extracted array
                         let poses = self.postProcessPose2(prediction: multiArray)
                         //print(poses)
@@ -321,31 +321,37 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         return error
     }
     
-    func postProcessPose2(prediction: MLMultiArray, confidenceThreshold: Float = 0.35) -> [(box: Box, keypoints: Keypoints)] {
-        let detectionResults = prediction
+    func postProcessPose(prediction: MLMultiArray, confidenceThreshold: Float = 0.25) -> [(box: Box, keypoints: Keypoints)] {
         let detectionResultsArray = prediction.dataPointer.bindMemory(to: Float.self, capacity: prediction.count)
-        var detectionResultsMatrix = [[Float]]()
-        for i in 0..<prediction.shape[1].intValue {
-            var row = [Float]()
-            for j in 0..<prediction.shape[2].intValue {
-                row.append(detectionResultsArray[i * prediction.shape[2].intValue + j])
+
+        var detectionResultsMatrix = [[Float]](repeating: [Float](repeating: 0, count: prediction.shape[1].intValue), count: prediction.shape[2].intValue)
+
+        //print("detection results matrix count1: \(detectionResultsMatrix.count)")
+        //print("detection results matrix count2: \(detectionResultsMatrix[0].count)")
+
+        
+        // Populate the detectionResultsMatrix with the correct values
+        for i in 0..<prediction.shape[0].intValue {
+            for j in 0..<prediction.shape[1].intValue {
+                detectionResultsMatrix[i][j] = detectionResultsArray[i * prediction.shape[1].intValue + j]
             }
-            detectionResultsMatrix.append(row)
         }
+
+        // Extract boxes, confidences, and keypoints
+        var boxes = [[Float]](repeating: [Float](repeating: 0, count: 4), count: detectionResultsMatrix.count)
+        var confidences = [Float](repeating: 0, count: detectionResultsMatrix.count)
+        var keypoints = [[Float]](repeating: [Float](repeating: 0, count: 16), count: detectionResultsMatrix.count)
+
+        //print("detection results matrix count: \(detectionResultsMatrix.count)")
         
-        var boxes = [[Float]]()
-        var confidences = [Float]()
-        var keypoints = [[Float]]()
-        
-        for i in 0..<4 {
-            boxes.append(detectionResultsMatrix[i])
+        for i in 0..<detectionResultsMatrix.count {
+            boxes[i] = Array(detectionResultsMatrix[i][0...3])
+            confidences[i] = detectionResultsMatrix[i][4]
+            keypoints[i] = Array(detectionResultsMatrix[i][5...20])
         }
-        
-        confidences = detectionResultsMatrix[4]
-        for i in 5..<detectionResultsMatrix.count {
-            keypoints.append(detectionResultsMatrix[i])
-        }
-        
+        //print("boxes count: \(boxes.count)")
+
+        // Filter based on confidenceThreshold
         var filteredBoxes = [[Float]]()
         var filteredConfidences = [Float]()
         var filteredKeypoints = [[Float]]()
@@ -353,71 +359,233 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         var preOutKpsn = [(x: Float, y: Float)]()
         var preOutKps = [(x: Float, y: Float)]()
         var outKps = [Keypoints]()
-        
-        // add proper Keypoints and Boxes
-        /**
-         public struct Box {
-             public let conf: Float
-             public let xywh: CGRect
-             public let xywhn: CGRect
-         }
 
-         public struct Keypoints {
-             public var xyn: [(x:Float, y:Float)]
-             public var xy: [(x:Float, y:Float)]
-             public let conf: [Float]
-         }
-         */
-        
-        
         for (idx, confidence) in confidences.enumerated() {
             if confidence > confidenceThreshold {
-                for i in 0..<4 {
-                    filteredBoxes[i].append(boxes[i][idx])
-                }
+                filteredBoxes.append(boxes[idx])
                 filteredConfidences.append(confidence)
-                for box in filteredBoxes {
-                    let xn = CGFloat(box[0])
-                    let yn = CGFloat(box[1])
-                    let wn = CGFloat(box[2])
-                    let hn = CGFloat(box[3])
-                    var rectn = CGRect(x: xn, y: yn, width: wn, height: hn)
-                    let x = CGFloat(box[0]) * bufferSize.width
-                    let y = CGFloat(box[1]) * bufferSize.height
-                    let w = CGFloat(box[2]) * bufferSize.width
-                    let h = CGFloat(box[3]) * bufferSize.height
-                    var rect = CGRect(x: x, y: y, width: w, height: h)
-                    var structBox = Box(conf: confidence, xywh: rect, xywhn: rectn)
-                    outBoxes.append(structBox)
-                }
-                for i in 0..<keypoints.count {
-                    filteredKeypoints[i].append(keypoints[i][idx])
-                }
-                for kp in filteredKeypoints {
-                    let xn = kp[0]
-                    let yn = kp[1]
-                    let x = kp[0] * Float(bufferSize.width)
-                    let y = kp[1] * Float(bufferSize.height)
-                    preOutKps.append((x: x, y: y))
-                    preOutKpsn.append((x: xn, y: yn))
-                }
-                let structKP = Keypoints(xyn: preOutKpsn, xy: preOutKps, conf: [confidence])
-                outKps.append(structKP)
+                filteredKeypoints.append(keypoints[idx])
             }
         }
+        print("filteredConfidences.max: \(filteredConfidences.max()!)" )
+        print("count: \(filteredConfidences.count)" )
         
-        if filteredConfidences.count > 0 {
-            let maxConfidenceIdx = filteredConfidences.firstIndex(of: filteredConfidences.max()!)!
-            let maxConfidence = filteredConfidences[maxConfidenceIdx]
-            let maxConfidenceBox = filteredBoxes.map { $0[maxConfidenceIdx] }
-            let maxConfidenceKeypoints = filteredKeypoints.map { $0[maxConfidenceIdx] }
+        for i in 0..<filteredConfidences.count {
+            let box = filteredBoxes[i]
+            let xn = CGFloat(box[0])
+            let yn = CGFloat(box[1])
+            let wn = CGFloat(box[2])
+            let hn = CGFloat(box[3])
+            let rectn = CGRect(x: xn, y: yn, width: wn, height: hn)
+            let x = CGFloat(box[0]) * bufferSize.width
+            let y = CGFloat(box[1]) * bufferSize.height
+            let w = CGFloat(box[2]) * bufferSize.width
+            let h = CGFloat(box[3]) * bufferSize.height
+            let rect = CGRect(x: x, y: y, width: w, height: h)
+            let structBox = Box(conf: filteredConfidences[i], xywh: rect, xywhn: rectn)
+            outBoxes.append(structBox)
+
+            let kp = filteredKeypoints[i]
+            for j in stride(from: 0, to: kp.count, by: 2) {
+                let xn = kp[j]
+                let yn = kp[j + 1]
+                let x = kp[j] * Float(bufferSize.width)
+                let y = kp[j + 1] * Float(bufferSize.height)
+                preOutKps.append((x: x, y: y))
+                preOutKpsn.append((x: xn, y: yn))
+            }
+            let structKP = Keypoints(xyn: preOutKpsn, xy: preOutKps, conf: [filteredConfidences[i]])
+            outKps.append(structKP)
         }
-        
+
         var retVar = [(Box, Keypoints)]()
         for (idx, box) in outBoxes.enumerated() {
             retVar.append((box, outKps[idx]))
         }
         return retVar
+    }
+    
+//    func postProcessPose( prediction: MLMultiArray )
+//    -> [(box: Box, keypoints: Keypoints)]   {
+//        let numAnchors = prediction.shape[2].intValue
+//        let featureCount = prediction.shape[1].intValue - 5
+//        
+//        var boxes = [CGRect]()
+//        var scores = [Float]()
+//        var features = [[Float]]()
+//        
+//        let featurePointer = UnsafeMutablePointer<Float>(OpaquePointer(prediction.dataPointer))
+//        let lock = DispatchQueue(label: "com.example.lock")
+//        
+//        DispatchQueue.concurrentPerform(iterations: numAnchors) { j in
+//            let confIndex = 4 * numAnchors + j
+//            let confidence = featurePointer[confIndex]
+//            
+//            if confidence > 0.35 {
+//                let x = featurePointer[j]
+//                let y = featurePointer[numAnchors + j]
+//                let width = featurePointer[2 * numAnchors + j]
+//                let height = featurePointer[3 * numAnchors + j]
+//                
+//                let boxWidth = CGFloat(width)
+//                let boxHeight = CGFloat(height)
+//                let boxX = CGFloat(x - width / 2.0)
+//                let boxY = CGFloat(y - height / 2.0)
+//                let boundingBox = CGRect(
+//                    x: boxX, y: boxY,
+//                    width: boxWidth, height: boxHeight)
+//                
+//                var boxFeatures = [Float](repeating: 0, count: featureCount)
+//                for k in 0..<featureCount {
+//                    let key = (5 + k) * numAnchors + j
+//                    boxFeatures[k] = featurePointer[key]
+//                }
+//                
+//                lock.sync {
+//                    boxes.append(boundingBox)
+//                    scores.append(confidence)
+//                    features.append(boxFeatures)
+//                }
+//            }
+//        }
+//        
+//        let selectedIndices = nonMaxSuppression(boxes: boxes, scores: scores, threshold: 0.5)
+//        
+//        let filteredBoxes = selectedIndices.map { boxes[$0] }
+//        let filteredScores = selectedIndices.map { scores[$0] }
+//        let filteredFeatures = selectedIndices.map { features[$0] }
+//        
+//        let boxScorePairs = zip(filteredBoxes, filteredScores)
+//        let results: [(Box, Keypoints)] = zip(boxScorePairs, filteredFeatures).map {
+//            (pair, boxFeatures) in
+//            let (box, score) = pair
+//            let Nx = box.origin.x / CGFloat(modelInputSize.width)
+//            let Ny = box.origin.y / CGFloat(modelInputSize.height)
+//            let Nw = box.size.width / CGFloat(modelInputSize.width)
+//            let Nh = box.size.height / CGFloat(modelInputSize.height)
+//            let ix = Nx * bufferSize.width
+//            let iy = Ny * bufferSize.height
+//            let iw = Nw * bufferSize.width
+//            let ih = Nh * bufferSize.height
+//            let normalizedBox = CGRect(x: Nx, y: Ny, width: Nw, height: Nh)
+//            let imageSizeBox = CGRect(x: ix, y: iy, width: iw, height: ih)
+//            let boxResult = Box(
+//                conf: score, xywh: imageSizeBox, xywhn: normalizedBox)
+//            let numKeypoints = boxFeatures.count / 3
+//            
+//            var xynArray = [(x: Float, y: Float)]()
+//            var xyArray = [(x: Float, y: Float)]()
+//            var confArray = [Float]()
+//            
+//            for i in 0..<numKeypoints {
+//                let kx = boxFeatures[3 * i]
+//                let ky = boxFeatures[3 * i + 1]
+//                let kc = boxFeatures[3 * i + 2]
+//                
+//                let nX = kx / Float(modelInputSize.width)
+//                let nY = ky / Float(modelInputSize.height)
+//                xynArray.append((x: nX, y: nY))
+//                
+//                let x = nX * Float(bufferSize.width)
+//                let y = nY * Float(bufferSize.height)
+//                xyArray.append((x: x, y: y))
+//                
+//                confArray.append(kc)
+//            }
+//            
+//            let keypoints = Keypoints(xyn: xynArray, xy: xyArray, conf: confArray)
+//            return (boxResult, keypoints)
+//        }
+//        
+//        return results
+//    }
+    
+    func postProcessPose2(prediction: MLMultiArray, confidenceThreshold: Float = 0.35) -> [(box: Box, keypoints: Keypoints)] {
+        let numAnchors = prediction.shape[2].intValue
+        let featureCount = prediction.shape[1].intValue - 5
+        var boxes = [CGRect]()
+        var scores = [Float]()
+        var features = [[Float]]()
+
+        let featurePointer = UnsafeMutablePointer<Float>(OpaquePointer(prediction.dataPointer))
+        let lock = DispatchQueue(label: "com.example.lock")
+
+        DispatchQueue.concurrentPerform(iterations: numAnchors) { j in
+            let confIndex = 4 * numAnchors + j
+            let confidence = featurePointer[confIndex]
+
+            if confidence > confidenceThreshold {
+                let x = featurePointer[j]
+                let y = featurePointer[numAnchors + j]
+                let width = featurePointer[2 * numAnchors + j]
+                let height = featurePointer[3 * numAnchors + j]
+
+                let boxWidth = CGFloat(width)
+                let boxHeight = CGFloat(height)
+                let boxX = CGFloat(x - width / 2.0)
+                let boxY = CGFloat(y - height / 2.0)
+                let boundingBox = CGRect(x: boxX, y: boxY, width: boxWidth, height: boxHeight)
+
+                var boxFeatures = [Float](repeating: 0, count: featureCount)
+                for k in 0..<featureCount {
+                    let key = (5 + k) * numAnchors + j
+                    boxFeatures[k] = featurePointer[key]
+                }
+
+                lock.sync {
+                    boxes.append(boundingBox)
+                    scores.append(confidence)
+                    features.append(boxFeatures)
+                }
+            }
+        }
+
+        let selectedIndices = nonMaxSuppression(boxes: boxes, scores: scores, threshold: 0.75)
+
+        let filteredBoxes = selectedIndices.map { boxes[$0] }
+        let filteredScores = selectedIndices.map { scores[$0] }
+        let filteredFeatures = selectedIndices.map { features[$0] }
+
+        let boxScorePairs = zip(filteredBoxes, filteredScores)
+        let results: [(Box, Keypoints)] = zip(boxScorePairs, filteredFeatures).map { (pair, boxFeatures) in
+            let (box, score) = pair
+            let Nx = box.origin.x / CGFloat(modelInputSize.width)
+            let Ny = box.origin.y / CGFloat(modelInputSize.height)
+            let Nw = box.size.width / CGFloat(modelInputSize.width)
+            let Nh = box.size.height / CGFloat(modelInputSize.height)
+            let ix = Nx * bufferSize.width
+            let iy = Ny * bufferSize.height
+            let iw = Nw * bufferSize.width
+            let ih = Nh * bufferSize.height
+            let normalizedBox = CGRect(x: Nx, y: Ny, width: Nw, height: Nh)
+            let imageSizeBox = CGRect(x: ix, y: iy, width: iw, height: ih)
+            let boxResult = Box(conf: score, xywh: imageSizeBox, xywhn: normalizedBox)
+            let numKeypoints = boxFeatures.count / 2  // Adjusted for the correct number of keypoints
+
+            var xynArray = [(x: Float, y: Float)]()
+            var xyArray = [(x: Float, y: Float)]()
+            var confArray = [Float]()
+
+            for i in 0..<numKeypoints {
+                let kx = boxFeatures[2 * i]
+                let ky = boxFeatures[2 * i + 1]
+                
+                let nX = kx / Float(modelInputSize.width)
+                let nY = ky / Float(modelInputSize.height)
+                xynArray.append((x: nX, y: nY))
+                
+                let x = nX * Float(bufferSize.width)
+                let y = nY * Float(bufferSize.height)
+                xyArray.append((x: x, y: y))
+                
+                confArray.append(1.0) // Assuming confidence of 1.0 for each keypoint
+            }
+
+            let keypoints = Keypoints(xyn: xynArray, xy: xyArray, conf: confArray)
+            return (boxResult, keypoints)
+        }
+
+        return results
     }
     
     
@@ -482,7 +650,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 //        CATransaction.begin()
 //        CATransaction.setValue(kCFBooleanTrue, forKey: kCATransactionDisableActions)
         
-        detectionOverlay.setAffineTransform(CGAffineTransform(rotationAngle: 0.0).scaledBy(x: scale, y: scale))
+        //detectionOverlay.setAffineTransform(CGAffineTransform(rotationAngle: 0.0).scaledBy(x: scale, y: scale))
         detectionOverlay.position = CGPoint(x: bounds.midX, y: bounds.midY)
         
         CATransaction.commit()
@@ -491,11 +659,16 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     public func drawVisionRequestResult(_ results: [(box: Box, keypoints: Keypoints)]) {
         var drawings:[CGRect] = []
         for result in results {
-            let drawing = CGRect(x: result.box.xywh.midX-result.box.xywh.width/2, y: result.box.xywh.midY-result.box.xywh.height/2, width: result.box.xywh.width, height: result.box.xywh.height)
+            let box = result.box.xywhn
+            let drawing = CGRect(
+                x: box.origin.x * detectionOverlay.bounds.width,
+                y: box.origin.y * detectionOverlay.bounds.height,
+                width: box.size.width * detectionOverlay.bounds.width,
+                height: box.size.height * detectionOverlay.bounds.height
+            )
             drawings.append(drawing)
-        }// Static rectangle for demonstration
-        //let drawing = CGRect(x: detectionOverlay.bounds.midX-75, y: detectionOverlay.bounds.midY-37, width: 150, height: 75) // Static rectangle for demonstration
-        
+        }
+
         CATransaction.begin()
         CATransaction.setValue(kCFBooleanTrue, forKey: kCATransactionDisableActions)
         detectionOverlay?.sublayers = nil
@@ -503,34 +676,34 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             let shapeLayer = createRoundedRectLayerWithBounds(drawing)
             detectionOverlay?.addSublayer(shapeLayer)
         }
-        for kp in results{
-            var kpDrawing = createDotLayers(kp.keypoints)
+        for kp in results {
+            let kpDrawing = createDotLayers(kp.keypoints)
             for layer in kpDrawing {
                 detectionOverlay?.addSublayer(layer)
             }
         }
         self.updateLayerGeometry()
-        
         CATransaction.commit()
     }
-    
-    func createDotLayers(_ kps: Keypoints) -> [CAShapeLayer]{
-        var layers:[CAShapeLayer] = []
-        for dot in kps.xy {
-          let landmarkLayer = CAShapeLayer()
-          let color:CGColor = UIColor.systemTeal.cgColor
-          let stroke:CGColor = UIColor.yellow.cgColor
-          
-          landmarkLayer.fillColor = color
-          landmarkLayer.strokeColor = stroke
-          landmarkLayer.lineWidth = 2.0
-          
-          let center = CGPoint(
-            x: CGFloat(dot.x),
-            y: CGFloat(dot.y))
-          let radius: CGFloat = 5.0 // Adjust this as needed.
-          let rect = CGRect(x: CGFloat(dot.x) - radius, y: CGFloat(dot.y) - radius, width: radius * 2, height: radius * 2)
-          landmarkLayer.path = UIBezierPath(ovalIn: rect).cgPath
+
+    func createDotLayers(_ kps: Keypoints) -> [CAShapeLayer] {
+        var layers: [CAShapeLayer] = []
+        for dot in kps.xyn {
+            let landmarkLayer = CAShapeLayer()
+            let color: CGColor = UIColor.systemTeal.cgColor
+            let stroke: CGColor = UIColor.yellow.cgColor
+
+            landmarkLayer.fillColor = color
+            landmarkLayer.strokeColor = stroke
+            landmarkLayer.lineWidth = 2.0
+
+            let center = CGPoint(
+                x: CGFloat(dot.x) * detectionOverlay.bounds.width,
+                y: CGFloat(dot.y) * detectionOverlay.bounds.height
+            )
+            let radius: CGFloat = 5.0 // Adjust this as needed.
+            let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
+            landmarkLayer.path = UIBezierPath(ovalIn: rect).cgPath
             layers.append(landmarkLayer)
         }
         return layers
@@ -549,9 +722,13 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     func preprocessImage(_ pixelBuffer: CVPixelBuffer) -> CIImage? {
         // Create a CIImage from the pixel buffer
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        // print("detection size: \(detectionOverlay.bounds.size), buffer size: \(bufferSize), preview size: \(previewLayer.bounds.size), image size: \(ciImage.extent)")
         
+        
+//        let cropRect = CGRect(x: ciImage.extent.midX, y: ciImage.extent.midY, width: 448, height: 448)
+//        ciImage = ciImage.cropped(to: cropRect)
         // Resize the image to 640x640
-        guard let resizedCIImage = ciImage.resize(to: CGSize(width: 640, height: 640)) else {
+        guard let resizedCIImage = ciImage.resize(to: CGSize(width: 224, height: 224)) else {
             return nil
         }
         
