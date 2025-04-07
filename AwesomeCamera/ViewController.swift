@@ -310,7 +310,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             let classificationRequest = VNCoreMLRequest(model: visionModel) { (request, error) in
                 if let results = request.results as? [VNCoreMLFeatureValueObservation], let featureValue = results.first?.featureValue {
                     if let multiArray = featureValue.multiArrayValue {
-                        self.handleClassificationResults(results)
+                        self.handleClassificationResults(multiArray)
                     } else {
                         print("Failed to extract MLMultiArray from featureValue")
                     }
@@ -358,9 +358,28 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         return error
     }
     
-    // 
+    //
     func handleClassificationResults(_ results: MLMultiArray) {
+        // Assuming the multiArray shape is [1, 2, numAnchors]
+        let classLabels = ["glasses", "No glasses"]
 
+        // Extract confidence scores
+        let glassesConfidence = results[0].floatValue
+        let noGlassesConfidence = results[1].floatValue
+
+        // Determine the class with the highest confidence
+        let maxConfidence = max(glassesConfidence, noGlassesConfidence)
+        let detectedClassIndex = (glassesConfidence > noGlassesConfidence) ? 0 : 1
+        let detectedClassLabel = classLabels[detectedClassIndex]
+        // Truncate the max confidence to two decimal places
+        let truncatedMaxConfidence = String(format: "%.2f", maxConfidence)
+        // Update the UI with the detected class
+        DispatchQueue.main.async {
+            self.classLabel.text = "Detected: \(detectedClassLabel) with confidence \(truncatedMaxConfidence)"
+        }
+        
+        print("Detected \(detectedClassLabel) with confidence \(truncatedMaxConfidence)")
+        
     }
         
     func postProcessPose2(prediction: MLMultiArray, confidenceThreshold: Float = 0.35) -> [(box: Box, keypoints: Keypoints)] {
